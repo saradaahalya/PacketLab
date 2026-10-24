@@ -1,0 +1,5 @@
+loss_rate_pct,packets,delivered,delivery_rate_pct,avg_latency_ms,retransmissions,avg_packet_size_bytes,elapsed_seconds
+0.0,20,20,100.0,0.53,0,17.0,0.01
+5.0,20,20,100.0,25.71,1,17.0,0.51
+10.0,20,20,100.0,76.5,3,17.0,1.53
+20.0,20,20,100.0,178.52,7,17.0,3.57
