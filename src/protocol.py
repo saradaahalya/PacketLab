@@ -11,6 +11,8 @@ SENSOR_MOTION = 3
 MSG_DATA = 1
 MSG_ACK = 2
 MSG_HEARTBEAT = 3
+MSG_STATS_REQ = 4
+MSG_STATS_REPLY = 5
 
 SENSOR_CONFIG = {
     1: SENSOR_TEMPERATURE,
@@ -84,3 +86,16 @@ def unpack_reading(payload):
         raise ValueError("motion value must be 0 or 1")
 
     return sensor_type, value, timestamp
+
+
+def pack_stats(unique_received, duplicates):
+    """Pack LLSP server statistics."""
+    return struct.pack(">II", unique_received, duplicates)
+
+
+def unpack_stats(payload):
+    """Unpack LLSP server statistics."""
+    if len(payload) != 8:
+        raise ValueError("invalid stats payload length")
+
+    return struct.unpack(">II", payload)

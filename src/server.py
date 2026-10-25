@@ -6,9 +6,12 @@ import time
 from protocol import (
     MSG_DATA,
     MSG_ACK,
+    MSG_STATS_REQ,
+    MSG_STATS_REPLY,
     FLAG_ACK_REQ,
     unpack,
     unpack_reading,
+    pack_stats,
     pack,
 )
 
@@ -51,6 +54,9 @@ def validate_reading(sensor_id, sensor_type, value):
 
 def start_server(quiet=False):
     """Receive, validate and acknowledge LLSP UDP packets."""
+
+    unique_received = 0
+    duplicates = 0
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
         server.bind((HOST, PORT))
@@ -103,6 +109,7 @@ def start_server(quiet=False):
                             )
 
                     if is_duplicate:
+                        duplicates += 1
                         if not quiet:
                             print(
                                 f"DUPLICATE: sensor={sensor_id}, "
@@ -129,6 +136,23 @@ def start_server(quiet=False):
                                 f"timestamp={timestamp} | "
                                 f"arrival={arrival_time:.3f}"
                             )
+
+                        unique_received += 1
+
+                elif message_type == MSG_STATS_REQ:
+                    stats_packet = pack(
+                        MSG_STATS_REPLY,
+                        sensor_id,
+                        sequence_number,
+                        payload=pack_stats(unique_received, duplicates),
+                    )
+                    server.sendto(stats_packet, client_address)
+                    if not quiet:
+                        print(
+                            f"STATS reply sent | "
+                            f"unique={unique_received} | "
+                            f"duplicates={duplicates}"
+                        )
 
                 elif message_type == MSG_ACK:
                     print(

@@ -124,6 +124,17 @@ class TestLLSPProtocol(unittest.TestCase):
 
         self.assertEqual(timestamp, 0)
 
+    def test_stats_round_trip(self):
+        """Statistics payloads should retain their counters."""
+        payload = protocol.pack_stats(12, 3)
+
+        self.assertEqual(protocol.unpack_stats(payload), (12, 3))
+
+    def test_stats_payload_size(self):
+        """Statistics payloads must contain exactly 8 bytes."""
+        with self.assertRaises(ValueError):
+            protocol.unpack_stats(b"\x00" * 7)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
