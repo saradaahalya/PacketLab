@@ -1,4 +1,5 @@
 
+import argparse
 import socket
 import time
 
@@ -48,7 +49,7 @@ def validate_reading(sensor_id, sensor_type, value):
         raise ValueError("motion must be 0 or 1")
 
 
-def start_server():
+def start_server(quiet=False):
     """Receive, validate and acknowledge LLSP UDP packets."""
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
@@ -61,7 +62,10 @@ def start_server():
         print("Press Ctrl+C to stop the server.\n")
 
         while True:
-            packet, client_address = server.recvfrom(BUFFER_SIZE)
+            try:
+                packet, client_address = server.recvfrom(BUFFER_SIZE)
+            except ConnectionResetError:
+                continue
 
             try:
                 # 1. Validate the LLSP packet and its checksum
@@ -83,11 +87,27 @@ def start_server():
                     packet_key = (sensor_id, sequence_number)
                     is_duplicate = packet_key in received_packets
 
-                    if is_duplicate:
-                        print(
-                            f"DUPLICATE: sensor={sensor_id}, "
-                            f"seq={sequence_number}"
+                    # 4. Acknowledge DATA packets when requested.
+                    # ACK duplicates too, so a sender can stop retrying.
+                    if message["flags"] & FLAG_ACK_REQ:
+                        ack_packet = pack(
+                            MSG_ACK,
+                            sensor_id,
+                            sequence_number,
                         )
+                        server.sendto(ack_packet, client_address)
+                        if not quiet:
+                            print(
+                                f"ACK sent for sensor={sensor_id}, "
+                                f"seq={sequence_number}"
+                            )
+
+                    if is_duplicate:
+                        if not quiet:
+                            print(
+                                f"DUPLICATE: sensor={sensor_id}, "
+                                f"seq={sequence_number}"
+                            )
                     else:
                         received_packets.add(packet_key)
 
@@ -99,26 +119,16 @@ def start_server():
                             3: "Motion",
                         }
 
-                        print(
-                            f"DATA received | "
-                            f"sensor={sensor_id} | "
-                            f"type={sensor_names[sensor_type]} | "
-                            f"value={value:.2f} | "
-                            f"seq={sequence_number} | "
-                            f"timestamp={timestamp} | "
-                            f"arrival={arrival_time:.3f}"
-                        )
-
-                    # 4. Acknowledge DATA packets when requested.
-                    # ACK duplicates too, so a sender can stop retrying.
-                    if message["flags"] & FLAG_ACK_REQ:
-                        ack_packet = pack(
-                            MSG_ACK,
-                            sensor_id,
-                            sequence_number,
-                        )
-                        server.sendto(ack_packet, client_address)
-                        print(f"ACK sent for sensor={sensor_id}, seq={sequence_number}")
+                        if not quiet:
+                            print(
+                                f"DATA received | "
+                                f"sensor={sensor_id} | "
+                                f"type={sensor_names[sensor_type]} | "
+                                f"value={value:.2f} | "
+                                f"seq={sequence_number} | "
+                                f"timestamp={timestamp} | "
+                                f"arrival={arrival_time:.3f}"
+                            )
 
                 elif message_type == MSG_ACK:
                     print(
@@ -139,7 +149,15 @@ def start_server():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the LLSP UDP server.")
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress per-packet DATA, ACK, and duplicate output",
+    )
+    args = parser.parse_args()
+
     try:
-        start_server()
+        start_server(quiet=args.quiet)
     except KeyboardInterrupt:
         print("\nServer stopped.")
