@@ -23,14 +23,13 @@ SERVER_PORT = 9999
 SENSOR_ID = 1
 SENSOR_TYPE = 1  # Temperature
 
-ACK_TIMEOUT = 0.5
 MAX_RETRIES = 3
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_FILE = PROJECT_ROOT / "results" / "llsp_benchmark.csv"
 
 
-def run_experiment(packet_count, loss_rate, sock, start_seq):
+def run_experiment(packet_count, loss_rate, sock, start_seq, timeout):
     latencies = []
     delivered = 0
     retransmissions = 0
@@ -80,7 +79,7 @@ def run_experiment(packet_count, loss_rate, sock, start_seq):
                     acknowledged = True
                     break
 
-            except socket.timeout:
+            except (socket.timeout, ConnectionResetError):
                 pass
             except ValueError:
                 pass
@@ -95,6 +94,7 @@ def run_experiment(packet_count, loss_rate, sock, start_seq):
 
     return {
         "loss_rate_pct": round(loss_rate * 100, 1),
+        "timeout_ms": round(timeout * 1000, 2),
         "packets": packet_count,
         "delivered": delivered,
         "delivery_rate_pct": round(
@@ -116,13 +116,21 @@ def main():
         description="Benchmark the LLSP UDP protocol."
     )
     parser.add_argument(
-        "--packets", type=int, default=20,
+        "--packets", type=int, default=500,
         help="Number of logical packets per experiment."
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=0.05,
+        help="ACK timeout in seconds."
     )
     parser.add_argument(
         "--loss-rates", type=float, nargs="+",
         default=[0.0, 0.05, 0.10, 0.20],
         help="Simulated loss probabilities."
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Replace the existing results file."
     )
     args = parser.parse_args()
 
@@ -136,7 +144,7 @@ def main():
 
     # One socket keeps the benchmark's receive path simple.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.settimeout(ACK_TIMEOUT)
+        sock.settimeout(args.timeout)
 
         # Random starting sequence reduces collisions with earlier runs.
         start_seq = random.randint(0, 65535)
@@ -146,7 +154,7 @@ def main():
             print(f"\nRunning experiment: {loss_rate * 100:.0f}% loss")
 
             result = run_experiment(
-                args.packets, loss_rate, sock, start_seq
+                args.packets, loss_rate, sock, start_seq, args.timeout
             )
             start_seq = (
                 start_seq + args.packets
@@ -164,12 +172,15 @@ def main():
 
     fieldnames = list(results[0].keys())
     write_header = (
+        args.overwrite
+        or
         not RESULTS_FILE.exists()
         or RESULTS_FILE.stat().st_size == 0
     )
 
     with RESULTS_FILE.open(
-        "a", newline="", encoding="utf-8"
+        "w" if args.overwrite else "a",
+        newline="", encoding="utf-8"
     ) as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
 
