@@ -4,9 +4,21 @@ import struct
 
 VERSION = 1
 
+SENSOR_TEMPERATURE = 1
+SENSOR_HUMIDITY = 2
+SENSOR_MOTION = 3
+
 MSG_DATA = 1
 MSG_ACK = 2
 MSG_HEARTBEAT = 3
+
+SENSOR_CONFIG = {
+    1: SENSOR_TEMPERATURE,
+    2: SENSOR_TEMPERATURE,
+    3: SENSOR_HUMIDITY,
+    4: SENSOR_HUMIDITY,
+    5: SENSOR_MOTION,
+}
 
 FLAG_ACK_REQ = 0x01
 
@@ -55,5 +67,20 @@ def pack_reading(sensor_type, value, ts_ms):
 
 
 def unpack_reading(payload):
-    """Unpack a sensor reading payload."""
-    return struct.unpack(">BfI", payload)
+    """Unpack and validate a sensor reading payload."""
+    if len(payload) != 9:
+        raise ValueError("invalid sensor reading payload length")
+
+    sensor_type, value, timestamp = struct.unpack(">BfI", payload)
+
+    if sensor_type not in (
+        SENSOR_TEMPERATURE,
+        SENSOR_HUMIDITY,
+        SENSOR_MOTION,
+    ):
+        raise ValueError("unsupported sensor type")
+
+    if sensor_type == SENSOR_MOTION and value not in (0.0, 1.0):
+        raise ValueError("motion value must be 0 or 1")
+
+    return sensor_type, value, timestamp
