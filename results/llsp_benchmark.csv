@@ -1,5 +1,9 @@
-loss_rate_pct,timeout_ms,packets,delivered,delivery_rate_pct,avg_latency_ms,retransmissions,avg_packet_size_bytes,elapsed_seconds
-0.0,50.0,5,0,0.0,0,10,17.0,0.07
-5.0,50.0,5,0,0.0,0,10,17.0,0.06
-10.0,50.0,5,0,0.0,0,10,17.0,0.1
-20.0,50.0,5,0,0.0,0,10,17.0,0.18
+loss_rate_pct,mode,timeout_ms,packets,delivered,delivery_rate_pct,avg_latency_ms,retransmissions,avg_packet_size_bytes,elapsed_seconds,server_unique,server_duplicates
+0.0,reliable,50.0,500,500,100.0,0.15,0,17.0,0.08,500,0
+0.0,unreliable,50.0,500,500,100.0,,0,17.0,1.48,500,0
+5.0,reliable,50.0,500,500,100.0,4.36,34,17.0,2.19,500,0
+5.0,unreliable,50.0,500,477,95.4,,0,17.0,1.43,477,0
+10.0,reliable,50.0,500,500,100.0,5.96,47,17.0,2.99,500,0
+10.0,unreliable,50.0,500,448,89.6,,0,17.0,1.5,448,0
+20.0,reliable,50.0,500,496,99.2,13.57,122,17.0,7.47,496,0
+20.0,unreliable,50.0,500,390,78.0,,0,17.0,1.47,390,0
