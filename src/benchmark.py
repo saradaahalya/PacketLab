@@ -12,10 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from protocol import (
     MSG_DATA,
     MSG_ACK,
+    MSG_STATS_REQ,
+    MSG_STATS_REPLY,
     FLAG_ACK_REQ,
     pack,
     unpack,
     pack_reading,
+    unpack_stats,
 )
 
 SERVER_HOST = "127.0.0.1"
@@ -29,7 +32,38 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_FILE = PROJECT_ROOT / "results" / "llsp_benchmark.csv"
 
 
-def run_experiment(packet_count, loss_rate, sock, start_seq, timeout):
+def get_stats(sock):
+    """Request the server's received-packet statistics."""
+    request = pack(MSG_STATS_REQ, SENSOR_ID, 0)
+
+    for _ in range(3):
+        try:
+            sock.sendto(request, (SERVER_HOST, SERVER_PORT))
+
+            while True:
+                response, _ = sock.recvfrom(2048)
+                try:
+                    message = unpack(response)
+                except ValueError:
+                    continue
+
+                if (
+                    message["type"] == MSG_STATS_REPLY
+                    and message["sensor_id"] == SENSOR_ID
+                ):
+                    try:
+                        return unpack_stats(message["payload"])
+                    except ValueError:
+                        continue
+        except (socket.timeout, ConnectionResetError):
+            pass
+
+    return None
+
+
+def run_experiment(
+    packet_count, loss_rate, sock, start_seq, timeout, mode, interval
+):
     latencies = []
     delivered = 0
     retransmissions = 0
@@ -49,10 +83,16 @@ def run_experiment(packet_count, loss_rate, sock, start_seq, timeout):
             MSG_DATA,
             SENSOR_ID,
             seq,
-            flags=FLAG_ACK_REQ,
+            flags=FLAG_ACK_REQ if mode == "reliable" else 0,
             payload=payload,
         )
         packet_sizes.append(len(packet))
+
+        if mode == "unreliable":
+            if random.random() >= loss_rate:
+                sock.sendto(packet, (SERVER_HOST, SERVER_PORT))
+            time.sleep(interval)
+            continue
 
         message_start = time.perf_counter()
         acknowledged = False
@@ -94,6 +134,7 @@ def run_experiment(packet_count, loss_rate, sock, start_seq, timeout):
 
     return {
         "loss_rate_pct": round(loss_rate * 100, 1),
+        "mode": mode,
         "timeout_ms": round(timeout * 1000, 2),
         "packets": packet_count,
         "delivered": delivered,
@@ -102,7 +143,7 @@ def run_experiment(packet_count, loss_rate, sock, start_seq, timeout):
         ),
         "avg_latency_ms": round(
             sum(latencies) / len(latencies), 2
-        ) if latencies else 0,
+        ) if latencies else (0 if mode == "reliable" else ""),
         "retransmissions": retransmissions,
         "avg_packet_size_bytes": round(
             sum(packet_sizes) / len(packet_sizes), 2
@@ -124,6 +165,15 @@ def main():
         help="ACK timeout in seconds."
     )
     parser.add_argument(
+        "--mode", choices=("reliable", "unreliable", "both"),
+        default="both",
+        help="Benchmark mode to run."
+    )
+    parser.add_argument(
+        "--interval", type=float, default=0.002,
+        help="Delay between unreliable-mode sends in seconds."
+    )
+    parser.add_argument(
         "--loss-rates", type=float, nargs="+",
         default=[0.0, 0.05, 0.10, 0.20],
         help="Simulated loss probabilities."
@@ -140,6 +190,9 @@ def main():
     if any(not 0 <= rate <= 1 for rate in args.loss_rates):
         parser.error("Each loss rate must be between 0 and 1")
 
+    if args.interval < 0:
+        parser.error("--interval must not be negative")
+
     RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     # One socket keeps the benchmark's receive path simple.
@@ -150,25 +203,74 @@ def main():
         start_seq = random.randint(0, 65535)
         results = []
 
+        modes = (
+            ("reliable", "unreliable")
+            if args.mode == "both" else (args.mode,)
+        )
+
         for loss_rate in args.loss_rates:
-            print(f"\nRunning experiment: {loss_rate * 100:.0f}% loss")
+            for mode in modes:
+                print(
+                    f"\nRunning experiment: {mode}, "
+                    f"{loss_rate * 100:.0f}% loss"
+                )
 
-            result = run_experiment(
-                args.packets, loss_rate, sock, start_seq, args.timeout
-            )
-            start_seq = (
-                start_seq + args.packets
-            ) & 0xFFFF
+                stats_before = get_stats(sock)
+                if stats_before is None:
+                    print(
+                        "Server is not responding to stats requests. "
+                        "Exiting."
+                    )
+                    return 1
 
-            results.append(result)
+                result = run_experiment(
+                    args.packets,
+                    loss_rate,
+                    sock,
+                    start_seq,
+                    args.timeout,
+                    mode,
+                    args.interval,
+                )
+                start_seq = (
+                    start_seq + args.packets
+                ) & 0xFFFF
 
-            print(f"Delivery rate: {result['delivery_rate_pct']}%")
-            print(f"Average ACK latency: {result['avg_latency_ms']} ms")
-            print(f"Retransmissions: {result['retransmissions']}")
-            print(
-                "Average packet size: "
-                f"{result['avg_packet_size_bytes']} bytes"
-            )
+                time.sleep(0.1)
+                stats_after = get_stats(sock)
+                if stats_after is None:
+                    print(
+                        "Server is not responding to stats requests. "
+                        "Exiting."
+                    )
+                    return 1
+
+                server_unique = stats_after[0] - stats_before[0]
+                server_duplicates = stats_after[1] - stats_before[1]
+                result["server_unique"] = server_unique
+                result["server_duplicates"] = server_duplicates
+
+                if mode == "unreliable":
+                    result["delivered"] = (
+                        server_unique + server_duplicates
+                    )
+                    result["delivery_rate_pct"] = round(
+                        result["delivered"] / args.packets * 100, 2
+                    )
+                    result["retransmissions"] = 0
+
+                results.append(result)
+
+                print(f"Delivery rate: {result['delivery_rate_pct']}%")
+                print(
+                    f"Average ACK latency: "
+                    f"{result['avg_latency_ms']} ms"
+                )
+                print(f"Retransmissions: {result['retransmissions']}")
+                print(
+                    "Average packet size: "
+                    f"{result['avg_packet_size_bytes']} bytes"
+                )
 
     fieldnames = list(results[0].keys())
     write_header = (
@@ -177,6 +279,19 @@ def main():
         not RESULTS_FILE.exists()
         or RESULTS_FILE.stat().st_size == 0
     )
+
+    if not write_header:
+        with RESULTS_FILE.open(
+            "r", newline="", encoding="utf-8"
+        ) as file:
+            existing_fieldnames = next(csv.reader(file), [])
+
+        if existing_fieldnames != fieldnames:
+            print(
+                "Results CSV has a different header. "
+                "Use --overwrite to replace it."
+            )
+            return 1
 
     with RESULTS_FILE.open(
         "w" if args.overwrite else "a",
@@ -193,4 +308,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
