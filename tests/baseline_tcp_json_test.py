@@ -1,9 +1,14 @@
 """Independent baseline tests; no changes to the team's packet tests."""
 
+import csv
+import io
+import json
 import socket
 import sys
 import threading
+import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -135,6 +140,75 @@ class TestTCPJSON(unittest.TestCase):
             self.assertFalse(thread.is_alive())
         self.assertEqual(results[0]["rejected_connections"], 1)
         self.assertEqual(results[0]["messages_received"], 1)
+
+    def test_loopback_client_csv_creates_header_and_appends_rows(self):
+        columns = ["count", "mean_rtt_ms", "median_rtt_ms",
+                   "mean_request_json_bytes", "reply_json_bytes_per_message",
+                   "elapsed_seconds", "acknowledged_messages_per_second"]
+        with tempfile.TemporaryDirectory() as directory:
+            for initially_empty in (False, True):
+                with self.subTest(initially_empty=initially_empty):
+                    path = Path(directory) / f"baseline-{initially_empty}.csv"
+                    if initially_empty:
+                        path.touch()
+                    results, errors = [], []
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                        listener.bind(("127.0.0.1", 0))
+                        listener.listen()
+                        port = listener.getsockname()[1]
+
+                        def server():
+                            try:
+                                results.append(baseline.serve(listener, timeout=2,
+                                                              max_messages=2))
+                            except Exception as error:
+                                errors.append(error)
+
+                        thread = threading.Thread(target=server, daemon=True)
+                        thread.start()
+                        try:
+                            for run in range(2):
+                                output = io.StringIO()
+                                with redirect_stdout(output):
+                                    status = baseline.main([
+                                        "client", "--port", str(port), "--count", "1",
+                                        "--csv", str(path)])
+                                self.assertEqual(status, 0)
+                                summary = json.loads(output.getvalue())
+                                with path.open(newline="", encoding="utf-8") as file:
+                                    reader = csv.DictReader(file)
+                                    self.assertEqual(reader.fieldnames, columns)
+                                    rows = list(reader)
+                                self.assertEqual(len(rows), run + 1)
+                                self.assertEqual(rows[-1]["count"], "1")
+                                for field in columns[1:]:
+                                    expected = (summary["reply_json_bytes"] /
+                                                summary["messages_acknowledged"]
+                                                if field == "reply_json_bytes_per_message"
+                                                else summary[field])
+                                    self.assertEqual(float(rows[-1][field]), expected)
+                        finally:
+                            thread.join(5)
+                        self.assertFalse(thread.is_alive(), "server did not exit")
+                    self.assertEqual(errors, [])
+                    self.assertEqual(results[0]["messages_received"], 2)
+
+    def test_failed_client_does_not_create_or_append_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.csv"
+            for existing in (False, True):
+                with self.subTest(existing=existing):
+                    if existing:
+                        path.write_bytes(b"existing,data\r\n")
+                    before = path.read_bytes() if existing else None
+                    output, errors = io.StringIO(), io.StringIO()
+                    with patch.object(baseline, "run_client", side_effect=socket.timeout), \
+                            redirect_stdout(output), redirect_stderr(errors):
+                        self.assertEqual(baseline.main([
+                            "client", "--csv", str(path)]), 1)
+                    self.assertEqual(output.getvalue(), "")
+                    self.assertIn("TCP JSON error:", errors.getvalue())
+                    self.assertEqual(path.read_bytes() if path.exists() else None, before)
 
     def test_idle_server_exits(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:

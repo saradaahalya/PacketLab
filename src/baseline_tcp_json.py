@@ -6,6 +6,7 @@ setup and input generation/serialization are outside each RTT measurement.
 """
 
 import argparse
+import csv
 import json
 import math
 import random
@@ -13,6 +14,7 @@ import socket
 import statistics
 import sys
 import time
+from pathlib import Path
 from typing import Iterable
 
 if __package__:
@@ -218,6 +220,26 @@ def run_client(host: str, port: int, readings: Iterable[dict], timeout=5.0) -> d
             "acknowledged_messages_per_second": count / elapsed if elapsed else 0.0}
 
 
+def append_csv(path: Path, result: dict):
+    """Append a completed client summary without changing its measurements."""
+    row = {
+        "count": result["messages_sent"],
+        "mean_rtt_ms": result["mean_rtt_ms"],
+        "median_rtt_ms": result["median_rtt_ms"],
+        "mean_request_json_bytes": result["mean_request_json_bytes"],
+        "reply_json_bytes_per_message": (
+            result["reply_json_bytes"] / result["messages_acknowledged"]
+        ),
+        "elapsed_seconds": result["elapsed_seconds"],
+        "acknowledged_messages_per_second": result["acknowledged_messages_per_second"],
+    }
+    with path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(row))
+        if file.tell() == 0:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def _positive_float(raw):
     value = float(raw)
     if not math.isfinite(value) or value <= 0:
@@ -243,6 +265,8 @@ def main(argv=None):
             command.add_argument("--sensors", type=int, choices=sorted(SENSOR_CONFIG),
                                  nargs="+", default=sorted(SENSOR_CONFIG))
             command.add_argument("--seed", type=int)
+            command.add_argument("--csv", type=Path, default=None,
+                                 help="append a successful run summary to this CSV file")
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("--port must be in 1..65535")
@@ -261,6 +285,8 @@ def main(argv=None):
             result = run_client(args.host, args.port,
                                 generate_readings(args.count, args.sensors, args.seed),
                                 args.timeout)
+            if args.csv is not None:
+                append_csv(args.csv, result)
     except (OSError, ValueError) as error:
         print(f"TCP JSON error: {error}", file=sys.stderr)
         return 1
