@@ -171,8 +171,9 @@ at a time. Direct execution (`python src/baseline_tcp_json.py ...`) also works.
 
 Frames are compact UTF-8 JSON plus one LF byte. Requests contain `sensor_id`,
 `seq`, `sensor_type`, `value`, `timestamp_ms`. A validation reply contains `ack`,
-`sensor_id`, `seq`. Generated values preserve LLSP's binary32 precision and 32-bit
-millisecond timestamp.
+`sensor_id`, `seq`. JSON carries the simulator's natural rounded values (for
+example, `27.65`); LLSP encodes those same logical values as binary32. Both use
+the same 32-bit truncation of the millisecond timestamp.
 
 The client prints JSON summaries of sent/acknowledged messages, mean/median RTT
 in milliseconds, request/reply JSON bytes, framing bytes and acknowledged messages
@@ -227,6 +228,10 @@ loss, and TCP has no equivalent impairment. These runs demonstrate LLSP retries,
 **not an equal network-loss comparison with TCP**. Fair loss-resilience testing
 needs an equivalent documented impairment model for both transports. No TCP
 packet-loss results are supplied.
+
+Compare application size and no-loss request/ACK timing between the transports,
+with the measurement differences below stated. Present LLSP's behavior under
+simulated loss as a separate result until equivalent impairment is available.
 
 ## Performance Metrics
 

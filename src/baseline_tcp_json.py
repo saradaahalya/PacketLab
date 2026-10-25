@@ -16,9 +16,9 @@ import time
 from typing import Iterable
 
 if __package__:
-    from .protocol import SENSOR_CONFIG, pack_reading, unpack_reading
+    from .protocol import SENSOR_CONFIG
 else:
-    from protocol import SENSOR_CONFIG, pack_reading, unpack_reading
+    from protocol import SENSOR_CONFIG
 
 
 MAX_FRAME_BYTES = 4096  # JSON bytes, excluding the single LF delimiter
@@ -111,7 +111,7 @@ def validate_reading(reading: dict):
 
 
 def generate_readings(count: int, sensor_ids=(1, 2, 3, 4, 5), seed=None):
-    """Round-robin sensors; match sensor.py ranges and protocol float32 values."""
+    """Round-robin sensors with natural rounded values and LLSP timestamps."""
     rng = random.Random(seed)
     sequences = {sensor_id: 0 for sensor_id in sensor_ids}
     for index in range(count):
@@ -123,9 +123,8 @@ def generate_readings(count: int, sensor_ids=(1, 2, 3, 4, 5), seed=None):
             value = round(rng.uniform(30.0, 80.0), 2)
         else:
             value = float(rng.choice([0, 1]))
-        # Preserve the value and timestamp actually decoded from LLSP on the wire.
-        _, value, timestamp = unpack_reading(pack_reading(
-            sensor_type, value, int(time.time() * 1000)))
+        # Keep natural JSON values; only the timestamp needs LLSP's truncation.
+        timestamp = int(time.time() * 1000) & 0xFFFFFFFF
         yield {"sensor_id": sensor_id, "seq": sequences[sensor_id],
                "sensor_type": sensor_type, "value": value,
                "timestamp_ms": timestamp}

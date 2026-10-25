@@ -176,9 +176,12 @@ Decoded header: type 1, flags 1, sensor ID 1, sequence 100. Reading:
 
 [src/baseline_tcp_json.py](../src/baseline_tcp_json.py) sends the equivalent fields
 `sensor_id`, `seq`, `sensor_type`, `value`, `timestamp_ms` as compact UTF-8 JSON
-followed by one LF byte (`0x0a`). Generated values pass through the LLSP reading
-codec to preserve binary32 precision and truncated timestamps. Generation follows
-the simulator's ranges without importing its threads/environment configuration.
+followed by one LF byte (`0x0a`). JSON carries natural rounded sensor values such
+as `27.65`, rather than the longer decimal expansion produced by converting them
+to binary32 first. LLSP encodes the same logical values as binary32, so small
+representation differences are expected. The timestamp retains LLSP's 32-bit
+millisecond truncation. Generation follows the simulator's ranges without
+importing its threads/environment configuration.
 
 Valid requests receive `{"ack":true,"sensor_id":1,"seq":0}` plus LF. Both sides
 buffer partial reads and retain following frames. Each frame may contain at most

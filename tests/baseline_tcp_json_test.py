@@ -5,9 +5,11 @@ import sys
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import baseline_tcp_json as baseline
+from protocol import pack_reading, unpack_reading
 
 
 class ChunkSocket:
@@ -54,10 +56,19 @@ class TestTCPJSON(unittest.TestCase):
         self.assertEqual([r["seq"] for r in readings], [0] * 5 + [1] * 5)
         for reading in readings:
             baseline.validate_reading(reading)
-            decoded = baseline.unpack_reading(baseline.pack_reading(
+            decoded = unpack_reading(pack_reading(
                 reading["sensor_type"], reading["value"], reading["timestamp_ms"]))
-            self.assertEqual(decoded[1], reading["value"])
+            self.assertAlmostEqual(decoded[1], reading["value"], places=5)
+            self.assertEqual(decoded[2], reading["timestamp_ms"])
+            self.assertEqual(reading["value"], round(reading["value"], 2))
             self.assertIsInstance(reading["value"], float)
+
+        with patch.object(baseline.random.Random, "uniform", return_value=27.65), \
+                patch.object(baseline.time, "time", return_value=2**32 + 1):
+            reading = next(baseline.generate_readings(1, sensor_ids=(1,)))
+        self.assertEqual(reading["value"], 27.65)
+        self.assertIn(b'"value":27.65,', baseline.encode_json(reading))
+        self.assertEqual(reading["timestamp_ms"], 1000)
 
     def test_invalid_reading_fields(self):
         reading = next(baseline.generate_readings(1, seed=1))
