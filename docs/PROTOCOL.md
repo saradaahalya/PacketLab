@@ -24,7 +24,7 @@ field in LLSP.
 | 1 | Flags | 1 | Unsigned byte | 0–255; bit `0x01` requests an ACK |
 | 2 | Sensor ID | 2 | Unsigned 16-bit | Encoder accepts 0–65535; server accepts DATA IDs 1–5 |
 | 4 | Sequence | 2 | Unsigned 16-bit | `seq & 0xFFFF`, modulo 65536 |
-| 6 | Payload | Variable | Raw bytes | DATA uses 9 bytes; server-generated ACK uses zero |
+| 6 | Payload | Variable | Raw bytes | DATA: 9 bytes; ACK/STATS request: zero; STATS reply: 8 bytes |
 | 6 + payload length | CRC | 2 | Unsigned 16-bit | `binascii.crc_hqx(header + payload, 0xFFFF)` |
 
 The CRC uses the CRC-CCITT polynomial `0x1021` through `crc_hqx`, initial value
@@ -44,6 +44,8 @@ flags are not rejected; only bit `0x01` is acted on.
 | `MSG_DATA` | 1 | Reading decoded and validated by the server |
 | `MSG_ACK` | 2 | Replies to valid DATA requesting an ACK; inbound ACKs logged |
 | `MSG_HEARTBEAT` | 3 | Constant only: payload format and operation unspecified |
+| `MSG_STATS_REQ` | 4 | Requests the server's current unique-reading and duplicate counters |
+| `MSG_STATS_REPLY` | 5 | Server response carrying the two counters |
 | `FLAG_ACK_REQ` | `0x01` | ACK requested for DATA, including duplicates |
 
 Unknown types pass the generic decoder and are logged as unsupported by the
@@ -131,6 +133,47 @@ the set. Random benchmark start sequences reduce collisions but do not eliminate
 them. This is not exactly-once delivery. A sender can report unconfirmed delivery
 even when the server received DATA but all usable ACKs were lost or ignored.
 
+## STATS request and reply
+
+STATS supports measuring server receipt when sending without ACKs. In unreliable
+mode, a sender has no ACKs to count, so the planned benchmark will query the server
+for how many unique readings it actually received. The codec and server support
+these messages now; the current benchmark still requests ACKs and does not yet
+query STATS.
+
+| Packet | Type | Payload | Total LLSP bytes |
+|---|---:|---|---:|
+| Request | `MSG_STATS_REQ = 4` | Empty | 8 |
+| Reply | `MSG_STATS_REPLY = 5` | `pack_stats(unique_received, duplicates)`, format `>II` | 16 |
+
+Both use the standard 6-byte header and 2-byte CRC. Construct a request with
+`pack(MSG_STATS_REQ, sensor_id, seq)` (flags zero). On receipt, `src/server.py`
+sends a reply to the request's source address, echoing its **sensor ID and sequence
+number**, with flags zero. Those fields correlate the reply with the request;
+the sensor ID does not filter the statistics. The reply needs no `FLAG_ACK_REQ`,
+and is a STATS reply rather than an ACK.
+
+The reply's 8-byte payload is two big-endian unsigned 32-bit integers:
+
+| Absolute offset | Field | Bytes | Range | Meaning |
+|---:|---|---:|---|---|
+| 6 | `unique_received` | 4 | 0–4294967295 | Valid DATA readings first accepted as new `(sensor_id, seq)` keys |
+| 10 | `duplicates` | 4 | 0–4294967295 | Valid DATA arrivals whose key was already in the duplicate set |
+
+`pack_stats()` uses `struct.pack(">II", ...)`; it does not mask overflowing
+counters. `unpack_stats()` requires exactly 8 payload bytes and returns
+`(unique_received, duplicates)`. Requests have an empty payload by convention;
+the current server does not enforce that length or check request flags. Generic
+packet CRC/version validation still applies.
+
+Counters cover the whole server process, across sensors and clients. They reset
+when the server restarts, not after a query, and inherit the duplicate cache's
+session and wraparound limitations. Queries do not isolate an experiment: a future
+benchmark must establish a clean counter baseline and avoid unrelated traffic.
+STATS uses UDP, so a request or reply can be lost; the current benchmark defines
+no query timeout/retry policy yet. There is no authentication: anyone who can
+reach the bound UDP port can query the counters. The default bind is loopback.
+
 ## Unreliable operation
 
 DATA with flags zero is validated/deduplicated without an ACK. A fire-and-forget
@@ -171,6 +214,29 @@ Decoded header: type 1, flags 1, sensor ID 1, sequence 100. Reading:
 ```text
 12 00 00 01 00 64 84 c6
 ```
+
+For STATS, generate a request and an illustrative reply containing 12 unique
+readings and 3 duplicate arrivals with the actual codec:
+
+```powershell
+python -c "from src.protocol import *; request=pack(MSG_STATS_REQ,1,100); reply=pack(MSG_STATS_REPLY,1,100,payload=pack_stats(12,3)); print(request.hex(' ')); print(len(request), unpack(request)); print(reply.hex(' ')); print(len(reply), unpack(reply)); print(unpack_stats(unpack(reply)['payload']))"
+```
+
+STATS request hex (8 bytes):
+
+```text
+14 00 00 01 00 64 09 27
+```
+
+Decoded request: type 4, flags 0, sensor ID 1, sequence 100, empty payload.
+STATS reply hex (16 bytes):
+
+```text
+15 00 00 01 00 64 00 00 00 0c 00 00 00 03 ee 92
+```
+
+Decoded reply: type 5, flags 0, sensor ID 1, sequence 100; `unpack_stats()` returns
+`(12, 3)`. These are example counter values, not measured experiment results.
 
 ## TCP + JSON baseline and measurements
 

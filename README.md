@@ -47,6 +47,8 @@ Implemented:
 - Five concurrent sensors: two temperature, two humidity and one motion.
 - Reliable sending with ACK timeout and up to three total attempts.
 - UDP validation, duplicate detection and repeat ACKs for duplicates.
+- STATS request/reply messages exposing process-wide unique-reading and duplicate
+  counts, ready for future unreliable-mode benchmark integration.
 - Sender-side simulated DATA loss and CSV-producing LLSP benchmark.
 - Standalone TCP + JSON server/client with framing, validation, application RTT,
   byte accounting and throughput summary.
@@ -213,6 +215,25 @@ python -m src.baseline_tcp_json client --help
 python -m pytest tests
 ```
 
+### Server statistics (STATS)
+
+The protocol/server now support `MSG_STATS_REQ = 4` and `MSG_STATS_REPLY = 5`.
+A request has no payload and is **8 bytes**. The **16-byte** reply contains an
+8-byte `>II` payload: unique valid readings received, then duplicate arrivals,
+both unsigned 32-bit counters. The reply echoes the request's sensor ID and
+sequence number; the sensor ID does not select a per-sensor count.
+
+This supports the upcoming unreliable benchmark: a sender that receives no ACKs
+can ask the server how many unique readings actually arrived. The current
+benchmark still uses ACK-counted delivery and has no unreliable-mode CLI or STATS
+query command yet. See [the protocol reference](docs/PROTOCOL.md#stats-request-and-reply)
+for the packet layout and [generated hex examples](docs/PROTOCOL.md#reproducible-packets).
+
+Counters are process-wide across clients and sensors, and reset when the server
+restarts. Queries do not reset them or isolate an experiment. There is no
+authentication: anyone who can reach the bound UDP port can query them (the
+default server bind is loopback). STATS datagrams can also be lost.
+
 ## Experimental Setup
 
 Planned loss rates are **0%, 5%, 10% and 20%**. Use equal sensor inputs, message
@@ -273,7 +294,7 @@ python -m pytest tests
 python -m pytest tests/baseline_tcp_json_test.py
 ```
 
-There are 10 original packet tests and 10 new baseline tests. The baseline suite
+There are 12 protocol tests (including STATS) and 10 baseline tests. The baseline suite
 covers partial/coalesced reads, invalid/truncated/oversized JSON, reading validation,
 UTF-8 size accounting, all five sensors, idle shutdown and repeated loopback
 connections on ephemeral ports.
