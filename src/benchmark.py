@@ -1,6 +1,8 @@
 
 import argparse
 import csv
+import itertools
+import math
 import random
 import socket
 import sys
@@ -9,6 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from llsp_reply import wait_for_reply
+
 from protocol import (
     MSG_DATA,
     MSG_ACK,
@@ -16,7 +20,6 @@ from protocol import (
     MSG_STATS_REPLY,
     FLAG_ACK_REQ,
     pack,
-    unpack,
     pack_reading,
     unpack_stats,
 )
@@ -30,31 +33,21 @@ MAX_RETRIES = 3
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_FILE = PROJECT_ROOT / "results" / "llsp_benchmark.csv"
+STATS_SEQUENCES = itertools.count()
 
 
 def get_stats(sock):
     """Request the server's received-packet statistics."""
-    request = pack(MSG_STATS_REQ, SENSOR_ID, 0)
-
+    seq = next(STATS_SEQUENCES) & 0xFFFF
+    request = pack(MSG_STATS_REQ, SENSOR_ID, seq)
     for _ in range(3):
         try:
             sock.sendto(request, (SERVER_HOST, SERVER_PORT))
-
-            while True:
-                response, _ = sock.recvfrom(2048)
-                try:
-                    message = unpack(response)
-                except ValueError:
-                    continue
-
-                if (
-                    message["type"] == MSG_STATS_REPLY
-                    and message["sensor_id"] == SENSOR_ID
-                ):
-                    try:
-                        return unpack_stats(message["payload"])
-                    except ValueError:
-                        continue
+            message = wait_for_reply(
+                sock, (SERVER_HOST, SERVER_PORT), MSG_STATS_REPLY,
+                SENSOR_ID, seq, 8, sock.gettimeout(),
+            )
+            return unpack_stats(message["payload"])
         except (socket.timeout, ConnectionResetError):
             pass
 
@@ -68,6 +61,7 @@ def run_experiment(
     delivered = 0
     retransmissions = 0
     packet_sizes = []
+    transmitted_readings = 0
     start_time = time.perf_counter()
 
     for index in range(packet_count):
@@ -91,11 +85,13 @@ def run_experiment(
         if mode == "unreliable":
             if random.random() >= loss_rate:
                 sock.sendto(packet, (SERVER_HOST, SERVER_PORT))
+                transmitted_readings += 1
             time.sleep(interval)
             continue
 
         message_start = time.perf_counter()
         acknowledged = False
+        transmitted = False
 
         for attempt in range(1, MAX_RETRIES + 1):
             if attempt > 1:
@@ -106,24 +102,20 @@ def run_experiment(
                 sock.sendto(
                     packet, (SERVER_HOST, SERVER_PORT)
                 )
+                transmitted = True
 
             try:
-                response, _ = sock.recvfrom(2048)
-                ack = unpack(response)
-
-                if (
-                    ack["type"] == MSG_ACK
-                    and ack["sensor_id"] == SENSOR_ID
-                    and ack["seq"] == seq
-                ):
-                    acknowledged = True
-                    break
+                wait_for_reply(sock, (SERVER_HOST, SERVER_PORT), MSG_ACK,
+                               SENSOR_ID, seq, 0, timeout)
+                acknowledged = True
+                break
 
             except (socket.timeout, ConnectionResetError):
                 pass
             except ValueError:
                 pass
 
+        transmitted_readings += int(transmitted)
         if acknowledged:
             delivered += 1
             latencies.append(
@@ -143,13 +135,37 @@ def run_experiment(
         ),
         "avg_latency_ms": round(
             sum(latencies) / len(latencies), 2
-        ) if latencies else (0 if mode == "reliable" else ""),
+        ) if latencies else "",
         "retransmissions": retransmissions,
         "avg_packet_size_bytes": round(
             sum(packet_sizes) / len(packet_sizes), 2
         ),
         "elapsed_seconds": round(elapsed, 2),
+        "ack_confirmed": delivered if mode == "reliable" else "",
+        "ack_confirmation_rate_pct": (
+            round(delivered / packet_count * 100, 2)
+            if mode == "reliable" else ""
+        ),
+        "transmitted_readings": transmitted_readings,
     }
+
+
+def apply_server_stats(result, before, after):
+    """Count new keys only; reject detectable contamination or counter reset."""
+    unique = after[0] - before[0]
+    duplicates = after[1] - before[1]
+    if (not 0 <= unique <= min(result["packets"], result["transmitted_readings"])
+            or duplicates < 0
+            or (result["ack_confirmed"] != ""
+                and unique < result["ack_confirmed"])):
+        raise ValueError(
+            "Inconsistent server counters: possible unrelated traffic, server "
+            "restart or reused sequences. Restart a dedicated server and rerun."
+        )
+    result["server_unique"] = unique
+    result["server_duplicates"] = duplicates
+    result["delivered"] = unique
+    result["delivery_rate_pct"] = round(unique / result["packets"] * 100, 2)
 
 
 def main():
@@ -182,25 +198,37 @@ def main():
         "--overwrite", action="store_true",
         help="Replace the existing results file."
     )
+    parser.add_argument("--output", type=Path, default=RESULTS_FILE,
+                        help="CSV path; use a new file for each run set")
     args = parser.parse_args()
 
     if args.packets <= 0:
         parser.error("--packets must be greater than zero")
 
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("--timeout must be finite and greater than zero")
+
     if any(not 0 <= rate <= 1 for rate in args.loss_rates):
         parser.error("Each loss rate must be between 0 and 1")
 
-    if args.interval < 0:
-        parser.error("--interval must not be negative")
+    if not math.isfinite(args.interval) or args.interval < 0:
+        parser.error("--interval must be finite and not negative")
+    scenario_count = len(args.loss_rates) * (2 if args.mode == "both" else 1)
+    if args.packets * scenario_count > 65536:
+        parser.error("Cannot reuse 16-bit sequences: reduce --packets or scenarios")
 
-    RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    output = args.output
+    output.parent.mkdir(parents=True, exist_ok=True)
 
     # One socket keeps the benchmark's receive path simple.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.settimeout(args.timeout)
 
-        # Random starting sequence reduces collisions with earlier runs.
-        start_seq = random.randint(0, 65535)
+        # Fresh receiver and disjoint ranges prevent sequence reuse in this run.
+        start_seq = 0
+        expected_stats = (0, 0)
+        print("Requires a fresh, dedicated UDP server with no other senders. "
+              "Global STATS cannot identify all unrelated traffic.")
         results = []
 
         modes = (
@@ -221,6 +249,11 @@ def main():
                         "Server is not responding to stats requests. "
                         "Exiting."
                     )
+                    return 1
+
+                if stats_before != expected_stats:
+                    print("Server is not fresh or counters changed between "
+                          "scenarios. Stop other senders and restart the server.")
                     return 1
 
                 result = run_experiment(
@@ -245,27 +278,22 @@ def main():
                     )
                     return 1
 
-                server_unique = stats_after[0] - stats_before[0]
-                server_duplicates = stats_after[1] - stats_before[1]
-                result["server_unique"] = server_unique
-                result["server_duplicates"] = server_duplicates
-
-                if mode == "unreliable":
-                    result["delivered"] = (
-                        server_unique + server_duplicates
-                    )
-                    result["delivery_rate_pct"] = round(
-                        result["delivered"] / args.packets * 100, 2
-                    )
-                    result["retransmissions"] = 0
+                try:
+                    apply_server_stats(result, stats_before, stats_after)
+                except ValueError as error:
+                    print(error)
+                    return 1
+                expected_stats = stats_after
 
                 results.append(result)
 
                 print(f"Delivery rate: {result['delivery_rate_pct']}%")
-                print(
-                    f"Average ACK latency: "
-                    f"{result['avg_latency_ms']} ms"
-                )
+                if mode == "reliable":
+                    print(f"ACK confirmation rate: "
+                          f"{result['ack_confirmation_rate_pct']}%")
+                latency = result["avg_latency_ms"]
+                print("Average ACK latency: " +
+                      (f"{latency} ms" if latency != "" else "N/A"))
                 print(f"Retransmissions: {result['retransmissions']}")
                 print(
                     "Average packet size: "
@@ -276,12 +304,12 @@ def main():
     write_header = (
         args.overwrite
         or
-        not RESULTS_FILE.exists()
-        or RESULTS_FILE.stat().st_size == 0
+        not output.exists()
+        or output.stat().st_size == 0
     )
 
     if not write_header:
-        with RESULTS_FILE.open(
+        with output.open(
             "r", newline="", encoding="utf-8"
         ) as file:
             existing_fieldnames = next(csv.reader(file), [])
@@ -289,11 +317,11 @@ def main():
         if existing_fieldnames != fieldnames:
             print(
                 "Results CSV has a different header. "
-                "Use --overwrite to replace it."
+                "Choose a new --output file to preserve historical results."
             )
             return 1
 
-    with RESULTS_FILE.open(
+    with output.open(
         "w" if args.overwrite else "a",
         newline="", encoding="utf-8"
     ) as file:
@@ -304,7 +332,7 @@ def main():
 
         writer.writerows(results)
 
-    print(f"\nResults saved to: {RESULTS_FILE}")
+    print(f"\nResults saved to: {output}")
 
 
 if __name__ == "__main__":
