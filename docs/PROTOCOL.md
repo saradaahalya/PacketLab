@@ -92,8 +92,9 @@ for latency or ordering. Clock synchronization and rollover recovery are absent.
 5. The server logs rejected packets and continues without ACKing invalid DATA.
 
 The generic decoder does not enforce message-specific payload lengths or reject
-unknown types/flags/IDs. Inbound ACK payload shape is not checked by the sender or
-server. The server reads at most 2048 bytes per datagram. There is no LLSP
+unknown types/flags/IDs. Senders require empty ACK payloads and zero flags.
+Inbound ACK logging at the server does not enforce a message-specific payload
+shape. The server reads at most 2048 bytes per datagram. There is no LLSP
 fragmentation/reassembly mechanism.
 
 ## Reliable operation and ACK format
@@ -109,17 +110,18 @@ increments modulo 65536 after each logical reading whether acknowledged or not,
 and sleeps 2 seconds after its attempts. All readings request ACKs.
 `ACK_TIMEOUT = 1.0` seconds. Despite its name, `MAX_RETRIES = 3` means **three total
 attempts**, including the first send: at most two retransmissions. Retries reuse
-the same packet, value, timestamp and sequence. A reply is accepted when its
-CRC/version decode and type, sensor ID, and sequence match. The sender does not
-verify the reply source address. An unexpected ACK consumes an attempt rather
-than starting a fresh wait within that attempt. There is no backoff or delayed-ACK
-queue; duplicate/stale ACKs have no dedicated handling.
+the same packet, value, timestamp and sequence. Both senders use
+`llsp_reply.wait_for_reply()` to check source address/port, CRC/version, type,
+sensor ID, sequence, zero flags and empty ACK payload. Unrelated replies are
+ignored until the original monotonic deadline; they do not consume another
+attempt or extend the deadline. Socket timeout is restored after each wait.
+These checks are correlation, not authentication.
 
-`src/benchmark.py` also permits three total attempts. Default timeout is 0.05
-seconds, configurable with `--timeout`. It sends only sensor 1 temperature
-readings, starts at a random sequence and advances sequence ranges between loss
-configurations. It counts each attempt after the first as a retransmission, even
-when the simulator suppresses that attempt's send.
+`src/benchmark.py` also permits three total attempts, with default timeout 0.05
+seconds (`--timeout`). It sends only sensor 1 temperature readings. A benchmark
+requires a fresh, dedicated server, starts DATA sequences at zero and advances
+disjoint ranges between scenarios. Total readings per invocation cannot exceed
+65536. Attempts after the first count as retransmissions even when suppressed.
 
 ### Duplicate and sequence limitations
 
@@ -129,17 +131,18 @@ not logged as new readings. The key has no client address, session or timestamp.
 There is no expiry, sliding window or wraparound handling. Sensor restarts,
 sequence wrap, benchmark collisions or independent senders sharing an ID can
 therefore misclassify new readings as duplicates. Restarting the server clears
-the set. Random benchmark start sequences reduce collisions but do not eliminate
-them. This is not exactly-once delivery. A sender can report unconfirmed delivery
+the set. The benchmark rejects a used server and avoids sequence reuse within one
+invocation. This does not fix sensor sessions or concurrent sender collisions.
+This is not exactly-once delivery. A sender can report unconfirmed delivery
 even when the server received DATA but all usable ACKs were lost or ignored.
 
 ## STATS request and reply
 
-STATS supports measuring server receipt when sending without ACKs. In unreliable
-mode, a sender has no ACKs to count, so the planned benchmark will query the server
-for how many unique readings it actually received. The codec and server support
-these messages now; the current benchmark still requests ACKs and does not yet
-query STATS.
+STATS is integrated into both benchmark modes. The benchmark queries counters
+before and after each scenario. A request uses a sequence advanced between queries;
+retries of that query reuse its sequence. Replies must match server source, type,
+sensor ID, sequence, zero flags and an 8-byte payload. Each query permits three
+attempts bounded by the configured socket timeout.
 
 | Packet | Type | Payload | Total LLSP bytes |
 |---|---:|---|---:|
@@ -166,21 +169,35 @@ counters. `unpack_stats()` requires exactly 8 payload bytes and returns
 the current server does not enforce that length or check request flags. Generic
 packet CRC/version validation still applies.
 
-Counters cover the whole server process, across sensors and clients. They reset
-when the server restarts, not after a query, and inherit the duplicate cache's
-session and wraparound limitations. Queries do not isolate an experiment: a future
-benchmark must establish a clean counter baseline and avoid unrelated traffic.
-STATS uses UDP, so a request or reply can be lost; the current benchmark defines
-no query timeout/retry policy yet. There is no authentication: anyone who can
-reach the bound UDP port can query the counters. The default bind is loopback.
+Counters cover the whole server process across sensors and clients. They reset
+on restart, not after a query. The benchmark requires zero initial counters and
+unchanged counters between scenarios. New unique keys cannot exceed logical
+readings actually transmitted, and ACK confirmations cannot exceed new receipt.
+Inconsistent counter deltas abort without recording that invocation's rows.
+
+The server cannot associate counters with an experiment. Unrelated traffic that
+fits those bounds can remain undetected. Use a fresh, dedicated server and stop
+all other senders. Never add duplicate arrivals to unique delivery or clamp an
+invalid percentage. STATS is unauthenticated UDP and can be lost.
+
+### Restart and wraparound workaround
+
+No safe session identity can be inferred from the existing wire fields. A new
+source port is not a stable protocol session identifier; timestamps wrap and can
+repeat; changed payloads are not proof of a new logical reading. Expiring keys
+could accept delayed retransmissions as new readings. Duplicate detection is
+therefore intentionally unchanged, rather than weakened before review.
+
+For independent demos, stop senders, restart the server, then start sensors or
+one benchmark invocation. A future wire-version design could include a session
+identifier echoed by ACKs, with a defined duplicate retention window.
 
 ## Unreliable operation
 
-DATA with flags zero is validated/deduplicated without an ACK. A fire-and-forget
-sender would send once without ACK waiting or application retries. **Neither the
-current sensor nor benchmark CLI selects this mode**: both request ACKs.
-`src/client.py` is an empty placeholder. An unreliable sender CLI remains future
-work; no command is invented here.
+DATA with flags zero is validated/deduplicated without ACK. The benchmark's
+`--mode unreliable` sends once without waiting or retrying; `--mode both` runs
+both modes (default). `--interval` controls unreliable pacing (default .002 s).
+The five-sensor simulator remains reliable-only. `src/client.py` stays empty.
 
 ## Simulated loss
 
@@ -274,17 +291,61 @@ established connection; that interval also includes generation and serialization
 JSON payload, LF framing and reply bytes are counted separately. None includes
 TCP/UDP/IP/Ethernet headers, transport ACKs, handshakes or link retransmissions.
 
-LLSP benchmark latency begins before the first attempt and ends at a matching
-ACK, so successful readings may include earlier timeouts and retries. It uses
-`perf_counter()` and milliseconds, not timestamp subtraction. This differs from
-single request/reply baseline RTT under unimpaired TCP. LLSP `delivered` counts
-matching ACKs, not independently measured unique server receipts. Its zero latency
-when nothing delivers is a placeholder, not a zero-duration observation.
+## Benchmark measurements, outputs and historical compatibility
 
-LLSP offers compact fixed DATA encoding and application reliability options;
-JSON is self-describing but larger, while TCP adds connection/transport behavior.
-Neither proves a speed advantage. Future comparisons should supply identical
-pre-generated readings to `run_client()` and LLSP encoding, repeat matched trials,
-measure unique server receipts and apply equivalent documented network impairment.
-Unified benchmarking, unreliable sender CLI, graphs, session-aware deduplication,
-security and heartbeat semantics remain future work.
+LLSP `avg_latency_ms` starts immediately before the first attempt and ends at a
+matching ACK. It includes earlier timeouts/retries and excludes unconfirmed
+readings. It is application confirmation time, not one-way latency. A missing
+measurement is blank and displays N/A, including all-failed reliable scenarios.
+TCP RTT is measured for an unimpaired request/reply on an established connection.
+Neither measurement proves a universal latency advantage.
+
+In new LLSP CSVs, `delivered` and `delivery_rate_pct` use only the new unique
+receiver count in both modes: unique received / distinct logical readings * 100.
+`server_duplicates` is separate. `ack_confirmed` and
+`ack_confirmation_rate_pct` preserve reliable confirmation semantics; they are
+blank in unreliable mode. ACK receipt and unique server receipt may differ.
+`transmitted_readings` counts logical readings with at least one actual send,
+not all send attempts. `packets` includes readings suppressed on every attempt.
+Other fields are `loss_rate_pct`, `mode`, `timeout_ms`, `avg_latency_ms`,
+`retransmissions`, `avg_packet_size_bytes`, `elapsed_seconds`, `server_unique`,
+and `server_duplicates`. Elapsed time is rounded; no LLSP throughput is supplied.
+
+Historical CSVs used ACK-counted reliable delivery and unique-plus-duplicate
+unreliable delivery. Existing historical rows have zero duplicates and matching
+unique/delivered counts, so the stored percentages remain interpretable. They
+are not evidence of the new implementation's timings. Preserve originals; run
+fresh experiments into a new file for new-code measurements. Appending a new
+schema to an old header is rejected, not silently converted.
+
+`benchmark.py` options: `--packets` (500), `--timeout` (.05 seconds), `--mode`
+(reliable/unreliable/both, default both), `--interval` (.002 seconds),
+`--loss-rates` (0 .05 .10 .20), `--output` (results/llsp_benchmark.csv), and
+explicit `--overwrite`. Timeout must be positive finite, interval nonnegative
+finite, loss probabilities in [0,1], and the invocation must fit 65536 sequences.
+Use a fresh output path and restart the receiver before each invocation.
+
+The PowerShell script supports `-Runs` (5), `-Packets` (500), and
+`-OutputDirectory`. It requires a new output directory, otherwise creates a
+unique directory under the OS temporary directory. Every run uses a fresh server,
+checks ports/readiness and preserves CSVs, server logs and four generated graphs.
+It does not delete historical data or stop unrelated processes. See README for
+verified demo commands.
+
+`plot.py --llsp PATH --tcp PATH --output-dir NEW_DIRECTORY` reads historical and
+new CSVs and writes delivery, latency, retransmission and application-size PNGs.
+Missing unreliable latency displays N/A. Plotting uses a noninteractive PNG
+backend. Error bars are sample standard deviations across runs, not confidence
+intervals. Groups use loss and mode only; do not mix packet counts/timeouts.
+Standalone plotting can replace same-named graphs in its selected directory.
+
+DATA size includes LLSP header, 9-byte payload and CRC. TCP request size is JSON
+plus one LF. These exclude TCP/UDP/IP/Ethernet headers, transport ACKs, handshakes
+and network retries; a size reduction is not measured total bandwidth savings.
+Only LLSP DATA attempts are suppressed. TCP remains unimpaired and ACK loss is
+not simulated, so loss-resilience comparisons are not equivalent network tests.
+
+The team contribution is the compact sensor-specific format, implementation and
+experimental analysis. CRCs, ACKs, sequence numbers and retries are standard ideas.
+Session-aware deduplication, security, heartbeat semantics and identical impaired
+TCP/LLSP trials remain outside the current implementation.

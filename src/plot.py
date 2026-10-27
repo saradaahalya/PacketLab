@@ -3,6 +3,10 @@ import csv
 import statistics
 from pathlib import Path
 
+import matplotlib
+
+# This command exports PNGs and does not need a desktop/Tk installation.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
@@ -237,10 +241,12 @@ def print_summary(rows, tcp):
     print("\nLLSP averaged results:")
     for row in rows:
         means = row["means"]
+        latency = (f"{means['avg_latency_ms']:.2f} ms"
+                   if "avg_latency_ms" in means else "N/A")
         print(
             f"  {row['mode']:10} loss={row['loss_rate_pct']:5.1f}% "
             f"runs={row['runs']} delivery={means.get('delivery_rate_pct', 0):.2f}% "
-            f"latency={means.get('avg_latency_ms', 0):.2f} ms "
+            f"latency={latency} "
             f"retransmissions={means.get('retransmissions', 0):.2f} "
             f"server_unique={means.get('server_unique', 0):.2f} "
             f"server_duplicates={means.get('server_duplicates', 0):.2f}"
@@ -252,10 +258,13 @@ def print_summary(rows, tcp):
 
 
 def main():
+    global GRAPH_DIR
     parser = argparse.ArgumentParser(description="Plot LLSP benchmark results.")
     parser.add_argument("--llsp", type=Path, default=DEFAULT_LLSP)
     parser.add_argument("--tcp", type=Path, default=DEFAULT_TCP)
+    parser.add_argument("--output-dir", type=Path, default=GRAPH_DIR)
     args = parser.parse_args()
+    GRAPH_DIR = args.output_dir
 
     if not args.llsp.exists():
         parser.error(f"LLSP results file not found: {args.llsp}")
