@@ -15,9 +15,10 @@ from protocol import (
     MSG_ACK,
     FLAG_ACK_REQ,
     pack,
-    unpack,
     pack_reading,
 )
+
+from llsp_reply import wait_for_reply
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 9999
@@ -96,26 +97,17 @@ def run_sensor(sensor_id, sensor_info):
                     else:
                         client.sendto(packet, (SERVER_HOST, SERVER_PORT))
 
-                    response, _ = client.recvfrom(2048)
-                    ack = unpack(response)
-
-                    if (
-                        ack["type"] == MSG_ACK
-                        and ack["sensor_id"] == sensor_id
-                        and ack["seq"] == sequence_number
-                    ):
-                        acknowledged = True
-                        print(
-                            f"Sensor {sensor_id}: "
-                            f"value={value:.2f}, "
-                            f"seq={sequence_number}, ACK received"
-                        )
-                        break
-
-                    print(
-                        f"Sensor {sensor_id}: unexpected ACK; "
-                        f"attempt {attempt}"
+                    wait_for_reply(
+                        client, (SERVER_HOST, SERVER_PORT), MSG_ACK,
+                        sensor_id, sequence_number, 0, ACK_TIMEOUT,
                     )
+                    acknowledged = True
+                    print(
+                        f"Sensor {sensor_id}: "
+                        f"value={value:.2f}, "
+                        f"seq={sequence_number}, ACK received"
+                    )
+                    break
 
                 except socket.timeout:
                     print(
